@@ -39,16 +39,32 @@ def get_deposits(session: requests.Session, enterprise_number: str) -> list:
     return r.json().get("content", [])
 
 def process_nbb_csv():
-    bce_list = get_active_bce_numbers()
-    hdfs = get_hdfs_client()
-    session = make_session()
+    logging.info("PROCESS | Démarrage du DAG 01a_scraping_nbb_csv")
+    
+    try:
+        logging.info("PROCESS | Étape 1 : Initialisation des dépendances")
+        bce_list = get_active_bce_numbers()
+        if not bce_list:
+            logging.warning("PROCESS | Liste BCE vide. Arrêt prématuré.")
+            return
+            
+        hdfs = get_hdfs_client()
+        session = make_session()
+        logging.info("PROCESS | Étape 1 terminée avec succès.")
+    except Exception as e:
+        logging.error(f"PROCESS | Échec critique d'initialisation : {str(e)}", exc_info=True)
+        raise
 
-    for bce in bce_list:
-        logging.info(f"NBB CSV | Traitement BCE: {bce}")
+    for idx, bce in enumerate(bce_list):
+        logging.info(f"NBB CSV | [{idx+1}/{len(bce_list)}] Traitement BCE: {bce}")
         try:
             deposits = get_deposits(session, bce)
+            logging.info(f"NBB CSV | {len(deposits)} dépôts trouvés pour {bce}")
+        except requests.exceptions.RequestException as req_e:
+            logging.error(f"NBB CSV | Timeout ou erreur réseau API pour {bce}: {str(req_e)}")
+            continue
         except Exception as e:
-            logging.error(f"Echec dépôts {bce}: {e}")
+            logging.error(f"NBB CSV | Échec inattendu requêtage dépôts {bce}: {str(e)}", exc_info=True)
             continue
 
         for dep in deposits:
@@ -56,21 +72,30 @@ def process_nbb_csv():
                 continue
 
             deposit_id = dep["id"]
-            year = dep["periodEndDateYear"]
+            year = dep.get("periodEndDateYear", "UNKNOWN")
 
             if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV"):
+                logging.info(f"NBB CSV | Dépôt {deposit_id} (Année: {year}) déjà téléchargé. Ignoré.")
                 continue
 
             hdfs_dir = f"/donnees_entreprises/{bce}/Compte_annuel/{year}"
+            csv_url = f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}"
             
+            logging.info(f"NBB CSV | Requête GET CSV : {csv_url}")
             try:
-                r_csv = session.get(f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}", timeout=30)
+                r_csv = session.get(csv_url, timeout=30)
                 r_csv.raise_for_status()
+                
                 write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.csv", r_csv.content)
                 mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV", year, hdfs_dir)
+                logging.info(f"NBB CSV | Succès intégration CSV: {deposit_id}")
                 time.sleep(0.3)
+            except requests.exceptions.HTTPError as http_e:
+                logging.error(f"NBB CSV | Échec HTTP {r_csv.status_code} pour CSV {deposit_id}")
             except Exception as e:
-                logging.error(f"Echec I/O CSV {deposit_id}: {e}")
+                logging.error(f"NBB CSV | Échec I/O global pour CSV {deposit_id}: {str(e)}", exc_info=True)
+                
+    logging.info("PROCESS | Fin d'exécution du DAG 01a_scraping_nbb_csv")
 
 def process_nbb_pdf():
     bce_list = get_active_bce_numbers()

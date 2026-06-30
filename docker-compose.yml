@@ -76,6 +76,8 @@ services:
       - "9050:9050"
     environment:
       - CONTROL_PASSWORD=mypass
+    networks:
+      - kbo
 
   tor2:
     image: dperson/torproxy
@@ -85,6 +87,8 @@ services:
       - "9052:9050"
     environment:
       - CONTROL_PASSWORD=mypass
+    networks:
+      - kbo
  
 
 volumes:

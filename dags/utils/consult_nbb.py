@@ -14,8 +14,8 @@ HEADERS = {
 }
 
 PROXIES = [
-    {"http": "socks5h://tor1:9050", "https": "socks5h://tor1:9050"},
-    {"http": "socks5h://tor2:9052", "https": "socks5h://tor2:9052"}
+    {"http": "socks5h://tor1:9150", "https": "socks5h://tor1:9150"},
+    {"http": "socks5h://tor2:9150", "https": "socks5h://tor2:9150"}
 ]
 proxy_pool = cycle(PROXIES)
 
@@ -25,46 +25,50 @@ def make_session() -> requests.Session:
     session.proxies.update(next(proxy_pool))
     return session
 
+def safe_request(session: requests.Session, url: str, max_retries: int = 4) -> requests.Response:
+    for attempt in range(max_retries):
+        try:
+            # Freinage absolu : 30 requêtes par minute
+            time.sleep(2) 
+            
+            r = session.get(url, timeout=30)
+            if r.status_code == 429:
+                logging.warning(f"HTTP 429 détecté. Rotation IP Tor imminente.")
+                session.proxies.update(next(proxy_pool))
+                time.sleep(10) # Temps de latence pour établissement du nouveau circuit
+                continue
+            r.raise_for_status()
+            return r
+        except requests.exceptions.ConnectionError:
+            logging.warning("Errno 111: Déni de service local du proxy. Rotation forcée.")
+            session.proxies.update(next(proxy_pool))
+            time.sleep(10)
+        except Exception as e:
+            logging.error(f"Échec réseau sur l'essai {attempt+1}: {str(e)}")
+            time.sleep(5)
+            
+    raise Exception(f"Blocage définitif sur l'URL: {url}")
+
 def get_deposits(session: requests.Session, enterprise_number: str) -> list:
     url = f"{BASE}/rs-consult/published-deposits?page=0&size=50&enterpriseNumber={enterprise_number}&sort=periodEndDate,desc"
     session.headers.update({"Referer": f"https://consult.cbso.nbb.be/consult-enterprise/{enterprise_number}"})
-    session.get(f"https://consult.cbso.nbb.be/consult-enterprise/{enterprise_number}")
-    
-    r = session.get(url, timeout=15)
-    if r.status_code == 429:
-        session.proxies.update(next(proxy_pool))
-        r = session.get(url, timeout=15)
-        
-    r.raise_for_status()
+    safe_request(session, f"https://consult.cbso.nbb.be/consult-enterprise/{enterprise_number}")
+    r = safe_request(session, url)
     return r.json().get("content", [])
 
 def process_nbb_csv():
-    logging.info("PROCESS | Démarrage du DAG 01a_scraping_nbb_csv")
-    
-    try:
-        logging.info("PROCESS | Étape 1 : Initialisation des dépendances")
-        bce_list = get_active_bce_numbers()
-        if not bce_list:
-            logging.warning("PROCESS | Liste BCE vide. Arrêt prématuré.")
-            return
-            
-        hdfs = get_hdfs_client()
-        session = make_session()
-        logging.info("PROCESS | Étape 1 terminée avec succès.")
-    except Exception as e:
-        logging.error(f"PROCESS | Échec critique d'initialisation : {str(e)}", exc_info=True)
-        raise
+    bce_list = get_active_bce_numbers()
+    hdfs = get_hdfs_client()
+    session = make_session()
 
     for idx, bce in enumerate(bce_list):
-        logging.info(f"NBB CSV | [{idx+1}/{len(bce_list)}] Traitement BCE: {bce}")
+        if idx % 100 == 0:
+            logging.info(f"Progression : {idx} / {len(bce_list)}")
+            
         try:
             deposits = get_deposits(session, bce)
-            logging.info(f"NBB CSV | {len(deposits)} dépôts trouvés pour {bce}")
-        except requests.exceptions.RequestException as req_e:
-            logging.error(f"NBB CSV | Timeout ou erreur réseau API pour {bce}: {str(req_e)}")
-            continue
         except Exception as e:
-            logging.error(f"NBB CSV | Échec inattendu requêtage dépôts {bce}: {str(e)}", exc_info=True)
+            logging.error(f"Abandon des dépôts pour {bce}: {e}")
             continue
 
         for dep in deposits:
@@ -75,55 +79,48 @@ def process_nbb_csv():
             year = dep.get("periodEndDateYear", "UNKNOWN")
 
             if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV"):
-                logging.info(f"NBB CSV | Dépôt {deposit_id} (Année: {year}) déjà téléchargé. Ignoré.")
                 continue
 
             hdfs_dir = f"/donnees_entreprises/{bce}/Compte_annuel/{year}"
             csv_url = f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}"
             
-            logging.info(f"NBB CSV | Requête GET CSV : {csv_url}")
             try:
-                r_csv = session.get(csv_url, timeout=30)
-                r_csv.raise_for_status()
-                
+                r_csv = safe_request(session, csv_url)
                 write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.csv", r_csv.content)
                 mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV", year, hdfs_dir)
-                logging.info(f"NBB CSV | Succès intégration CSV: {deposit_id}")
-                time.sleep(0.3)
-            except requests.exceptions.HTTPError as http_e:
-                logging.error(f"NBB CSV | Échec HTTP {r_csv.status_code} pour CSV {deposit_id}")
+                logging.info(f"Intégration CSV validée: {deposit_id}")
             except Exception as e:
-                logging.error(f"NBB CSV | Échec I/O global pour CSV {deposit_id}: {str(e)}", exc_info=True)
-                
-    logging.info("PROCESS | Fin d'exécution du DAG 01a_scraping_nbb_csv")
+                logging.error(f"Rejet I/O final CSV {deposit_id}: {e}")
 
 def process_nbb_pdf():
     bce_list = get_active_bce_numbers()
     hdfs = get_hdfs_client()
     session = make_session()
 
-    for bce in bce_list:
-        logging.info(f"NBB PDF | Traitement BCE: {bce}")
+    for idx, bce in enumerate(bce_list):
+        if idx % 100 == 0:
+            logging.info(f"Progression : {idx} / {len(bce_list)}")
+            
         try:
             deposits = get_deposits(session, bce)
         except Exception as e:
-            logging.error(f"Echec dépôts {bce}: {e}")
+            logging.error(f"Abandon des dépôts pour {bce}: {e}")
             continue
 
         for dep in deposits:
             deposit_id = dep["id"]
-            year = dep["periodEndDateYear"]
+            year = dep.get("periodEndDateYear", "UNKNOWN")
 
             if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL_PDF"):
                 continue
 
             hdfs_dir = f"/donnees_entreprises/{bce}/Compte_annuel/{year}"
+            pdf_url = f"{BASE}/external/broker/public/deposits/pdf/{deposit_id}"
             
             try:
-                r_pdf = session.get(f"{BASE}/external/broker/public/deposits/pdf/{deposit_id}", timeout=30)
-                r_pdf.raise_for_status()
+                r_pdf = safe_request(session, pdf_url)
                 write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.pdf", r_pdf.content)
                 mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL_PDF", year, hdfs_dir)
-                time.sleep(0.3)
+                logging.info(f"Intégration PDF validée: {deposit_id}")
             except Exception as e:
-                logging.error(f"Echec I/O PDF {deposit_id}: {e}")
+                logging.error(f"Rejet I/O final PDF {deposit_id}: {e}")

@@ -1,0 +1,40 @@
+# /data/KBO/activity.csv : 
+# "EntityNumber","ActivityGroup","NaceVersion","NaceCode","Classification"
+# "0200.065.765","006","2025","84130","MAIN"
+# "0200.065.765","001","2025","68121","MAIN"
+# "0200.065.765","001","2025","84130","SECO"
+# "0200.065.765","001","2025","82990","SECO"
+
+# /data/KBO/addess.csv :
+# "EntityNumber","TypeOfAddress","CountryNL","CountryFR","Zipcode","MunicipalityNL","MunicipalityFR","StreetNL","StreetFR","HouseNumber","Box","ExtraAddressInfo","DateStrikingOff"
+# "0200.065.765","REGO",,,"9070","Destelbergen","Destelbergen","Panhuisstraat","Panhuisstraat","1","","",
+
+# /data/KBO/branch.csv :
+#"Id","StartDate","EnterpriseNumber"
+#"9.000.006.626",01-09-1995,"0257.883.408"
+
+# /data/KBO/code.csv :
+# "Category","Code","Language","Description"
+# "ActivityGroup","001","FR","Activités TVA"
+# "ActivityGroup","001","NL","BTW-activiteiten"
+
+# /data/KBO/contact.csv :
+# "EntityNumber","EntityContact","ContactType","Value"
+# "0200.362.210","ENT","EMAIL","officiel.ic-inbw@inbw.be"
+# "0200.362.408","ENT","TEL","02 315 13 51"
+# "0200.362.408","ENT","EMAIL","info@isbw.be"
+
+# /data/KBO/denomination.csv :
+# "EntityNumber","Language","TypeOfDenomination","Denomination"
+# "0200.065.765","2","001","Intergemeentelijke Vereniging Veneco"
+# "0200.065.765","2","002","Veneco"
+
+# /data/KBO/enterprise.csv :
+# "EnterpriseNumber","Status","JuridicalSituation","TypeOfEnterprise","JuridicalForm","JuridicalFormCAC","StartDate"
+# "0200.065.765","AC","000","2","416",,09-08-1960
+# "0200.068.636","AC","000","2","417",,16-02-1923
+
+# /data/KBO/establishment.csv :
+# "EstablishmentNumber","StartDate","EnterpriseNumber"
+# "2.000.000.339",01-11-1974,"0403.449.823"
+# "2.000.000.438",01-09-1964,"0403.590.274"

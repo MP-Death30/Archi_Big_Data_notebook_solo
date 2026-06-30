@@ -17,8 +17,25 @@ FILES_MAPPING = {
     "address": {"file": "address.csv", "id_col": "EntityNumber"}, 
     "branch": {"file": "branch.csv", "id_col": "EnterpriseNumber"},
     "contact": {"file": "contact.csv", "id_col": "EntityNumber"},
-    "establishment": {"file": "establishment.csv", "id_col": "EnterpriseNumber"}
+    "establishment": {"file": "establishment.csv", "id_col": "EnterpriseNumber"},
+    "denomination": {"file": "denomination.csv", "id_col": "EntityNumber"}
 }
+
+def load_codes_mapping():
+    filepath = os.path.join(DATA_DIR, "code.csv")
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Arrêt critique. Fichier dictionnaire introuvable : {filepath}")
+    
+    codes = defaultdict(lambda: defaultdict(dict))
+    with open(filepath, mode='r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            cat = row["Category"]
+            code = row["Code"]
+            lang = row["Language"]
+            codes[cat][code][lang] = row["Description"]
+    print("Dictionnaire de codes chargé en mémoire.")
+    return codes
 
 def setup_sqlite():
     if os.path.exists(SQLITE_DB):
@@ -60,7 +77,7 @@ def setup_sqlite():
 def dict_factory(cursor, row):
     return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
 
-def process_and_load_mongo(sqlite_conn):
+def process_and_load_mongo(sqlite_conn, codes_dict):
     mongo_client = MongoClient(MONGO_URI)
     db = mongo_client[DB_NAME]
     collection = db[COLLECTION_NAME]
@@ -105,16 +122,45 @@ def process_and_load_mongo(sqlite_conn):
         establishments = defaultdict(list)
         for row in cursor.fetchall():
             establishments[row["EnterpriseNumber"]].append(row)
+
+        cursor.execute(f'SELECT * FROM denomination WHERE "EntityNumber" IN ({placeholders})', batch_ids)
+        denominations = defaultdict(list)
+        for row in cursor.fetchall():
+            denominations[row["EntityNumber"]].append(row)
             
         bulk_operations = []
         for ent_id, ent_doc in enterprises_data.items():
             primary_key = ent_id.replace(".", "")
             ent_doc["_id"] = primary_key
-            ent_doc["activites"] = activities.get(ent_id, [])
+            
+            # Enrichissement des activités avec les descriptions FR/NL
+            enriched_activities = []
+            for act in activities.get(ent_id, []):
+                act_group = act.get("ActivityGroup")
+                if act_group and act_group in codes_dict.get("ActivityGroup", {}):
+                    act["ActivityGroup_Desc_FR"] = codes_dict["ActivityGroup"][act_group].get("FR")
+                    act["ActivityGroup_Desc_NL"] = codes_dict["ActivityGroup"][act_group].get("NL")
+                
+                clas = act.get("Classification")
+                if clas and clas in codes_dict.get("Classification", {}):
+                    act["Classification_Desc_FR"] = codes_dict["Classification"][clas].get("FR")
+                    act["Classification_Desc_NL"] = codes_dict["Classification"][clas].get("NL")
+                
+                nace_ver = act.get("NaceVersion", "")
+                nace_code = act.get("NaceCode")
+                nace_cat = f"Nace{nace_ver}" if nace_ver else "Nace2008"
+                if nace_code and nace_code in codes_dict.get(nace_cat, {}):
+                    act["NaceCode_Desc_FR"] = codes_dict[nace_cat][nace_code].get("FR")
+                    act["NaceCode_Desc_NL"] = codes_dict[nace_cat][nace_code].get("NL")
+                
+                enriched_activities.append(act)
+
+            ent_doc["activites"] = enriched_activities
             ent_doc["adresses"] = addresses.get(ent_id, [])
             ent_doc["succursales"] = branches.get(ent_id, [])
             ent_doc["contacts"] = contacts.get(ent_id, [])
             ent_doc["etablissements"] = establishments.get(ent_id, [])
+            ent_doc["denominations"] = denominations.get(ent_id, [])
             
             bulk_operations.append(
                 UpdateOne(
@@ -135,5 +181,6 @@ def process_and_load_mongo(sqlite_conn):
     os.remove(SQLITE_DB)
 
 if __name__ == "__main__":
+    codes_dict = load_codes_mapping()
     conn = setup_sqlite()
-    process_and_load_mongo(conn)
+    process_and_load_mongo(conn, codes_dict)

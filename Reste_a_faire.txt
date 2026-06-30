@@ -1,0 +1,38 @@
+Manque la pagination (changer de page pour aller récupérer l'ensemble des informations , documents)
+
+Gestion des 429 -> rotation d'IP (Thor) (changement d'IP toutes les 10min par bridge Thor)
+- Blocage -> Changement d'IP
+
+
+State DB : Mettre des bonnes métadonnées (autre DB que celle des fichiers)
+	- ligne entrepriseID
+	- States (état)
+	- Date d'import
+	- Date de MAJ
+
+
+Ingestion des données :
+
+- DB de base (MongoDB)
+	- CSV
+	- données des sites
+
+
+
+CSV très important (à charger en premier) : enterprise.csv. Les autres peuvent être en lasyload.
+
+
+Airflow DAG pour la récupération des documents.
+
+
+
+pour peupler MongoDB (ou autre) avec les entreprises belges
+Dès qu'on a les numéros BCE dans MongoDB, on initialise la State DB (ou meta DB) qui track chaque fichier téléchargé : numéro BCE, deposit ID, année, statut (pending/done/error), chemin HDFS, timestamp,  C'est elle qui garantit qu'on ne re-télécharge jamais ce qui existe déjà
+Ensuite on code les DAG Airflow qui lisent les entreprises depuis MongoDB, vérifie la State DB pour le delta detection, et télécharge CSVs + PDFs vers Bronze HDFS depuis nbb strapor et eJustice, tout en mettant a jour cette meme STATE DB
+
+
+Jour 1 : Récupération des données brutes
+
+	Etape 1 : Gestion des CSV
+
+	Etape 2 : Scrapping

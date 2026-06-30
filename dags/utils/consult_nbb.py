@@ -2,12 +2,10 @@ import time
 import requests
 import logging
 from itertools import cycle
-from scripts.db_utils import (
+from utils.db_utils import (
     get_active_bce_numbers, is_downloaded, mark_downloaded, 
     get_hdfs_client, write_to_hdfs
 )
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BASE = "https://consult.cbso.nbb.be/api"
 HEADERS = {
@@ -34,20 +32,53 @@ def get_deposits(session: requests.Session, enterprise_number: str) -> list:
     
     r = session.get(url, timeout=15)
     if r.status_code == 429:
-        logging.warning("HTTP 429 détecté. Rotation proxy.")
         session.proxies.update(next(proxy_pool))
         r = session.get(url, timeout=15)
         
     r.raise_for_status()
     return r.json().get("content", [])
 
-def process_nbb():
+def process_nbb_csv():
     bce_list = get_active_bce_numbers()
     hdfs = get_hdfs_client()
     session = make_session()
 
     for bce in bce_list:
-        logging.info(f"NBB | Traitement BCE: {bce}")
+        logging.info(f"NBB CSV | Traitement BCE: {bce}")
+        try:
+            deposits = get_deposits(session, bce)
+        except Exception as e:
+            logging.error(f"Echec dépôts {bce}: {e}")
+            continue
+
+        for dep in deposits:
+            if dep.get("migration"):
+                continue
+
+            deposit_id = dep["id"]
+            year = dep["periodEndDateYear"]
+
+            if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV"):
+                continue
+
+            hdfs_dir = f"/donnees_entreprises/{bce}/Compte_annuel/{year}"
+            
+            try:
+                r_csv = session.get(f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}", timeout=30)
+                r_csv.raise_for_status()
+                write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.csv", r_csv.content)
+                mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV", year, hdfs_dir)
+                time.sleep(0.3)
+            except Exception as e:
+                logging.error(f"Echec I/O CSV {deposit_id}: {e}")
+
+def process_nbb_pdf():
+    bce_list = get_active_bce_numbers()
+    hdfs = get_hdfs_client()
+    session = make_session()
+
+    for bce in bce_list:
+        logging.info(f"NBB PDF | Traitement BCE: {bce}")
         try:
             deposits = get_deposits(session, bce)
         except Exception as e:
@@ -58,7 +89,7 @@ def process_nbb():
             deposit_id = dep["id"]
             year = dep["periodEndDateYear"]
 
-            if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL"):
+            if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL_PDF"):
                 continue
 
             hdfs_dir = f"/donnees_entreprises/{bce}/Compte_annuel/{year}"
@@ -67,20 +98,7 @@ def process_nbb():
                 r_pdf = session.get(f"{BASE}/external/broker/public/deposits/pdf/{deposit_id}", timeout=30)
                 r_pdf.raise_for_status()
                 write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.pdf", r_pdf.content)
+                mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL_PDF", year, hdfs_dir)
+                time.sleep(0.3)
             except Exception as e:
                 logging.error(f"Echec I/O PDF {deposit_id}: {e}")
-                continue
-
-            if not dep.get("migration"):
-                try:
-                    r_csv = session.get(f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}", timeout=30)
-                    r_csv.raise_for_status()
-                    write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.csv", r_csv.content)
-                except Exception as e:
-                    logging.error(f"Echec I/O CSV {deposit_id}: {e}")
-
-            mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL", year, hdfs_dir)
-            time.sleep(0.3)
-
-if __name__ == "__main__":
-    process_nbb()

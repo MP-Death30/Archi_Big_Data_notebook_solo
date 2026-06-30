@@ -91,36 +91,3 @@ def process_nbb_csv():
                 logging.info(f"Intégration CSV validée: {deposit_id}")
             except Exception as e:
                 logging.error(f"Rejet I/O final CSV {deposit_id}: {e}")
-
-def process_nbb_pdf():
-    bce_list = get_active_bce_numbers()
-    hdfs = get_hdfs_client()
-    session = make_session()
-
-    for idx, bce in enumerate(bce_list):
-        if idx % 100 == 0:
-            logging.info(f"Progression : {idx} / {len(bce_list)}")
-            
-        try:
-            deposits = get_deposits(session, bce)
-        except Exception as e:
-            logging.error(f"Abandon des dépôts pour {bce}: {e}")
-            continue
-
-        for dep in deposits:
-            deposit_id = dep["id"]
-            year = dep.get("periodEndDateYear", "UNKNOWN")
-
-            if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL_PDF"):
-                continue
-
-            hdfs_dir = f"/donnees_entreprises/{bce}/Compte_annuel/{year}"
-            pdf_url = f"{BASE}/external/broker/public/deposits/pdf/{deposit_id}"
-            
-            try:
-                r_pdf = safe_request(session, pdf_url)
-                write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.pdf", r_pdf.content)
-                mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL_PDF", year, hdfs_dir)
-                logging.info(f"Intégration PDF validée: {deposit_id}")
-            except Exception as e:
-                logging.error(f"Rejet I/O final PDF {deposit_id}: {e}")

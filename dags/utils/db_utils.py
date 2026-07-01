@@ -1,56 +1,50 @@
-import os
-import logging
+import pymongo
 from datetime import datetime
-from pymongo import MongoClient
 from hdfs import InsecureClient
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongodb:27017/")
-HDFS_URL = os.getenv("HDFS_URL", "http://namenode:9870")
-HDFS_USER = os.getenv("HDFS_USER", "airflow")
+MONGO_URI = "mongodb://mongodb:27017/"
 
-def get_mongo_client() -> MongoClient:
-    logging.info(f"DB_UTILS | Tentative de connexion MongoDB via {MONGO_URI}")
-    # serverSelectionTimeoutMS évite un blocage infini si MongoDB est down
-    return MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+def get_mongo_client():
+    return pymongo.MongoClient(MONGO_URI)
 
-def get_hdfs_client() -> InsecureClient:
-    logging.info(f"DB_UTILS | Tentative de connexion HDFS via {HDFS_URL}")
-    return InsecureClient(HDFS_URL, user=HDFS_USER)
-
-def get_active_bce_numbers(limit: int = None) -> list[str]:
-    logging.info("DB_UTILS | Récupération des numéros BCE actifs...")
+# ── ORCHESTRATION (Niveau Entreprise) ───────────────────────────────────────
+def get_pending_bce_numbers(limit=50):
     client = get_mongo_client()
     db = client["kbo_db"]
     
-    # Remplacement strict de la clause de filtrage
-    query = {"Status": "AC"} 
+    docs = list(db["scraping_queue"].find({"status": "pending"}).limit(limit))
+    bce_list = [d["_id"] for d in docs]
     
-    collection_name = "enterprises_rich" if "enterprises_rich" in db.list_collection_names() else "enterprises"
-    logging.info(f"DB_UTILS | Utilisation de la collection : {collection_name}")
-    
-    cursor = db[collection_name].find(query, {"_id": 1})
-    if limit:
-        cursor = cursor.limit(limit)
-        
-    result = [doc["_id"] for doc in cursor]
-    logging.info(f"DB_UTILS | {len(result)} numéros BCE chargés en mémoire.")
-    return result
+    if bce_list:
+        db["scraping_queue"].update_many(
+            {"_id": {"$in": bce_list}},
+            {"$set": {"status": "in_progress", "updated_at": datetime.utcnow()}}
+        )
+    return bce_list
 
+def mark_bce_status(bce: str, status: str):
+    client = get_mongo_client()
+    db = client["kbo_db"]
+    db["scraping_queue"].update_one(
+        {"_id": bce},
+        {"$set": {"status": status, "updated_at": datetime.utcnow()}}
+    )
+
+# ── IDEMPOTENCE (Niveau Document) ───────────────────────────────────────────
 def is_downloaded(bce_number: str, deposit_id: str, source: str) -> bool:
     client = get_mongo_client()
-    db = client["state_db"]
-    doc = db["downloads_tracking"].find_one({
-        "bce_number": bce_number,
-        "deposit_id": deposit_id,
-        "source": source,
-        "status": "DONE"
+    db = client["kbo_db"]
+    doc = db["state_db"].find_one({
+        "bce_number": bce_number, 
+        "deposit_id": deposit_id, 
+        "source": source
     })
     return doc is not None
 
 def mark_downloaded(bce_number: str, deposit_id: str, source: str, year: int, hdfs_path: str) -> None:
     client = get_mongo_client()
-    db = client["state_db"]
-    db["downloads_tracking"].update_one(
+    db = client["kbo_db"]
+    db["state_db"].update_one(
         {"bce_number": bce_number, "deposit_id": deposit_id, "source": source},
         {"$set": {
             "bce_number": bce_number,
@@ -64,6 +58,10 @@ def mark_downloaded(bce_number: str, deposit_id: str, source: str, year: int, hd
         upsert=True
     )
 
-def write_to_hdfs(client: InsecureClient, hdfs_path: str, data: bytes) -> None:
-    logging.info(f"DB_UTILS | Écriture HDFS cible: {hdfs_path} ({len(data)} bytes)")
-    client.write(hdfs_path, data, overwrite=True)
+# ── HDFS ────────────────────────────────────────────────────────────────────
+def get_hdfs_client():
+    return InsecureClient('http://namenode:9870', user='root')
+
+def write_to_hdfs(client, hdfs_path, content):
+    with client.write(hdfs_path, overwrite=True) as writer:
+        writer.write(content)

@@ -1,7 +1,7 @@
 import sys
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 
 sys.path.insert(0, '/opt/airflow')
 from utils.consult_nbb import process_nbb_csv

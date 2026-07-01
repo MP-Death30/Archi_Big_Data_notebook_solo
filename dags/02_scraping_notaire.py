@@ -28,7 +28,11 @@ HEADERS_API = {
 
 PROXIES = [
     {"http": "socks5h://tor1:9050", "https": "socks5h://tor1:9050"},
-    {"http": "socks5h://tor2:9052", "https": "socks5h://tor2:9052"}
+    {"http": "socks5h://tor2:9052", "https": "socks5h://tor2:9052"},
+    {"http": "socks5h://tor3:9053", "https": "socks5h://tor3:9053"},
+    {"http": "socks5h://tor4:9054", "https": "socks5h://tor4:9054"},
+    {"http": "socks5h://tor5:9055", "https": "socks5h://tor5:9055"},
+    {"http": "socks5h://tor6:9056", "https": "socks5h://tor6:9056"}
 ]
 proxy_pool = cycle(PROXIES)
 

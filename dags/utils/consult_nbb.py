@@ -1,9 +1,13 @@
 import time
+import random
 import requests
 import logging
 from itertools import cycle
+from requests.exceptions import RequestException
+
 from utils.db_utils import (
-    get_active_bce_numbers, is_downloaded, mark_downloaded, 
+    get_pending_bce_numbers, mark_bce_status, 
+    is_downloaded, mark_downloaded, 
     get_hdfs_client, write_to_hdfs
 )
 
@@ -15,84 +19,98 @@ HEADERS = {
 
 PROXIES = [
     {"http": "socks5h://tor1:9050", "https": "socks5h://tor1:9050"},
-    {"http": "socks5h://tor2:9052", "https": "socks5h://tor2:9052"}
+    {"http": "socks5h://tor2:9050", "https": "socks5h://tor2:9050"},
+    {"http": "socks5h://tor3:9050", "https": "socks5h://tor3:9050"},
+    {"http": "socks5h://tor4:9050", "https": "socks5h://tor4:9050"},
+    {"http": "socks5h://tor5:9050", "https": "socks5h://tor5:9050"},
+    {"http": "socks5h://tor6:9050", "https": "socks5h://tor6:9050"}
 ]
 proxy_pool = cycle(PROXIES)
 
-def make_session() -> requests.Session:
+def get_new_session() -> requests.Session:
+    """Force la destruction du pool de connexions via une nouvelle instance."""
     session = requests.Session()
     session.headers.update(HEADERS)
-    session.proxies.update(next(proxy_pool))
+    proxy = next(proxy_pool)
+    session.proxies.update(proxy)
+    logging.info(f"[ROUTAGE] Bascule forcée sur le noeud : {proxy['http']}")
     return session
 
-def get_deposits(session: requests.Session, enterprise_number: str) -> list:
-    url = f"{BASE}/rs-consult/published-deposits?page=0&size=50&enterpriseNumber={enterprise_number}&sort=periodEndDate,desc"
-    session.headers.update({"Referer": f"https://consult.cbso.nbb.be/consult-enterprise/{enterprise_number}"})
-    session.get(f"https://consult.cbso.nbb.be/consult-enterprise/{enterprise_number}")
-    
-    r = session.get(url, timeout=15)
-    if r.status_code == 429:
-        session.proxies.update(next(proxy_pool))
-        r = session.get(url, timeout=15)
-        
-    r.raise_for_status()
-    return r.json().get("content", [])
+def fetch_with_retry(session: requests.Session, url: str, referer: str = None, retries: int = 5):
+    """Wrapper transactionnel : intercepte les blocages API (429) et les défaillances SOCKS."""
+    if referer:
+        session.headers.update({"Referer": referer})
+        try:
+            session.get(referer, timeout=10)
+        except RequestException:
+            pass 
+            
+    for attempt in range(retries):
+        try:
+            r = session.get(url, timeout=30)
+            if r.status_code == 429:
+                logging.warning(f"Blocage 429 (Essai {attempt+1}/{retries}). Renouvellement du circuit.")
+                session = get_new_session()
+                time.sleep(random.uniform(2.0, 5.0))
+                continue
+            r.raise_for_status()
+            return r, session
+        except RequestException as e:
+            logging.warning(f"Défaillance réseau/SOCKS (Essai {attempt+1}/{retries}) : {str(e)[:80]}. Bascule noeud.")
+            session = get_new_session()
+            time.sleep(random.uniform(1.0, 2.0))
+            
+    raise Exception(f"Echec critique d'accès après {retries} tentatives : {url}")
+
 
 def process_nbb_csv():
-    logging.info("PROCESS | Démarrage du DAG 01a_scraping_nbb_csv")
-    
-    try:
-        logging.info("PROCESS | Étape 1 : Initialisation des dépendances")
-        bce_list = get_active_bce_numbers()
+    hdfs = get_hdfs_client()
+    session = get_new_session()
+
+    while True:
+        bce_list = get_pending_bce_numbers(limit=100)
         if not bce_list:
-            logging.warning("PROCESS | Liste BCE vide. Arrêt prématuré.")
-            return
+            logging.info("File d'attente d'orchestration épuisée.")
+            break
+
+        for bce_raw in bce_list:
+            bce_clean = str(bce_raw).replace(".", "")
             
-        hdfs = get_hdfs_client()
-        session = make_session()
-        logging.info("PROCESS | Étape 1 terminée avec succès.")
-    except Exception as e:
-        logging.error(f"PROCESS | Échec critique d'initialisation : {str(e)}", exc_info=True)
-        raise
-
-    for idx, bce in enumerate(bce_list):
-        logging.info(f"NBB CSV | [{idx+1}/{len(bce_list)}] Traitement BCE: {bce}")
-        try:
-            deposits = get_deposits(session, bce)
-            logging.info(f"NBB CSV | {len(deposits)} dépôts trouvés pour {bce}")
-        except requests.exceptions.RequestException as req_e:
-            logging.error(f"NBB CSV | Timeout ou erreur réseau API pour {bce}: {str(req_e)}")
-            continue
-        except Exception as e:
-            logging.error(f"NBB CSV | Échec inattendu requêtage dépôts {bce}: {str(e)}", exc_info=True)
-            continue
-
-        for dep in deposits:
-            if dep.get("migration"):
-                continue
-
-            deposit_id = dep["id"]
-            year = dep.get("periodEndDateYear", "UNKNOWN")
-
-            if is_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV"):
-                logging.info(f"NBB CSV | Dépôt {deposit_id} (Année: {year}) déjà téléchargé. Ignoré.")
-                continue
-
-            hdfs_dir = f"/donnees_entreprises/{bce}/Compte_annuel/{year}"
-            csv_url = f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}"
+            api_url = f"{BASE}/rs-consult/published-deposits?page=0&size=50&enterpriseNumber={bce_clean}&sort=periodEndDate,desc"
+            referer_url = f"https://consult.cbso.nbb.be/consult-enterprise/{bce_clean}"
             
-            logging.info(f"NBB CSV | Requête GET CSV : {csv_url}")
             try:
-                r_csv = session.get(csv_url, timeout=30)
-                r_csv.raise_for_status()
-                
-                write_to_hdfs(hdfs, f"{hdfs_dir}/{bce}_{year}_{deposit_id}.csv", r_csv.content)
-                mark_downloaded(bce, deposit_id, "COMPTE_ANNUEL_CSV", year, hdfs_dir)
-                logging.info(f"NBB CSV | Succès intégration CSV: {deposit_id}")
-                time.sleep(0.3)
-            except requests.exceptions.HTTPError as http_e:
-                logging.error(f"NBB CSV | Échec HTTP {r_csv.status_code} pour CSV {deposit_id}")
+                r, session = fetch_with_retry(session, api_url, referer=referer_url)
+                deposits = r.json().get("content", [])
             except Exception as e:
-                logging.error(f"NBB CSV | Échec I/O global pour CSV {deposit_id}: {str(e)}", exc_info=True)
+                logging.error(f"Abandon extraction entité {bce_clean}: {e}")
+                mark_bce_status(bce_raw, "pending")
+                continue
+
+            for dep in deposits:
+                deposit_id = dep["id"]
+                year = dep.get("periodEndDateYear")
                 
-    logging.info("PROCESS | Fin d'exécution du DAG 01a_scraping_nbb_csv")
+                if not year or int(year) < 2021:
+                    continue
+                    
+                if dep.get("migration"):
+                    continue
+
+                if is_downloaded(bce_clean, deposit_id, "COMPTE_ANNUEL"):
+                    continue
+
+                hdfs_dir = f"/donnees_entreprises/{bce_clean}/Compte_annuel/{year}"
+                csv_url = f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}"
+                
+                try:
+                    r_csv, session = fetch_with_retry(session, csv_url)
+                    write_to_hdfs(hdfs, f"{hdfs_dir}/{bce_clean}_{year}_{deposit_id}.csv", r_csv.content)
+                    mark_downloaded(bce_clean, deposit_id, "COMPTE_ANNUEL", year, hdfs_dir)
+                    logging.info(f"I/O HDFS : {bce_clean} | {year}")
+                except Exception as e:
+                    logging.error(f"Echec persistance I/O {deposit_id}: {e}")
+
+                time.sleep(random.uniform(0.5, 1.5))
+
+            mark_bce_status(bce_raw, "done")

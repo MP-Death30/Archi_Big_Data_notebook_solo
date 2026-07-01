@@ -16,6 +16,8 @@ services:
       - CLUSTER_NAME=pipeline
     env_file:
       - ./config/hadoop.env
+    networks:
+      - kbo
 
   datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
@@ -29,6 +31,8 @@ services:
       - ./config/hadoop.env
     depends_on:
       - namenode
+    networks:
+      - kbo
  
   # ── SPARK ───────────────────────────────────────────────────────────────────
   spark-master:
@@ -43,6 +47,8 @@ services:
     environment:
       - SPARK_MODE=master
       - SPARK_LOCAL_IP=spark-master
+    networks:
+      - kbo
  
   spark-worker:
     image: apache/spark:3.5.0
@@ -56,6 +62,8 @@ services:
       - SPARK_MODE=worker
       - SPARK_WORKER_CORES=2
       - SPARK_WORKER_MEMORY=4G
+    networks:
+      - kbo
  
   # ── MONGODB ─────────────────────────────────────────────────────────────────
   mongodb:
@@ -66,8 +74,10 @@ services:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
+    networks:
+      - kbo
  
-  # ── TOR (ROTATION IP) ───────────────────────────────────────────────────────
+# ── TOR (ROTATION IP) ───────────────────────────────────────────────────────
   tor1:
     image: dperson/torproxy
     container_name: tor1
@@ -85,6 +95,50 @@ services:
     restart: unless-stopped
     ports:
       - "9052:9050"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - kbo
+
+  tor3:
+    image: dperson/torproxy
+    container_name: tor3
+    restart: unless-stopped
+    ports:
+      - "9053:9050"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - kbo
+
+  tor4:
+    image: dperson/torproxy
+    container_name: tor4
+    restart: unless-stopped
+    ports:
+      - "9054:9050"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - kbo
+
+  tor5:
+    image: dperson/torproxy
+    container_name: tor5
+    restart: unless-stopped
+    ports:
+      - "9055:9050"
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks:
+      - kbo
+
+  tor6:
+    image: dperson/torproxy
+    container_name: tor6
+    restart: unless-stopped
+    ports:
+      - "9056:9050"
     environment:
       - CONTROL_PASSWORD=mypass
     networks:

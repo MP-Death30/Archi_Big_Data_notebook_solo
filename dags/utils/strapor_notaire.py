@@ -2,6 +2,7 @@ import json
 import time
 import logging
 import requests
+import random
 from itertools import cycle
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -22,7 +23,11 @@ HEADERS_API = {
 
 PROXIES = [
     {"http": "socks5h://tor1:9050", "https": "socks5h://tor1:9050"},
-    {"http": "socks5h://tor2:9052", "https": "socks5h://tor2:9052"}
+    {"http": "socks5h://tor2:9052", "https": "socks5h://tor2:9052"},
+    {"http": "socks5h://tor3:9053", "https": "socks5h://tor3:9053"},
+    {"http": "socks5h://tor4:9054", "https": "socks5h://tor4:9054"},
+    {"http": "socks5h://tor5:9055", "https": "socks5h://tor5:9055"},
+    {"http": "socks5h://tor6:9056", "https": "socks5h://tor6:9056"}
 ]
 proxy_pool = cycle(PROXIES)
 
@@ -122,7 +127,7 @@ def process_notaire():
             if len(statutes) < 20:
                 break
             offset += 20
-            time.sleep(0.3)
+            time.sleep(random.uniform(3.0, 7.0))
 
 if __name__ == "__main__":
     process_notaire()

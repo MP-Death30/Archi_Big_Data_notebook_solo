@@ -68,7 +68,7 @@ def process_nbb_csv():
     session = get_new_session()
 
     while True:
-        bce_list = get_pending_bce_numbers(limit=100)
+        bce_list = get_pending_bce_numbers(limit=50)
         if not bce_list:
             logging.info("File d'attente d'orchestration épuisée.")
             break
@@ -111,6 +111,6 @@ def process_nbb_csv():
                 except Exception as e:
                     logging.error(f"Echec persistance I/O {deposit_id}: {e}")
 
-                time.sleep(random.uniform(0.5, 1.5))
+                time.sleep(random.uniform(1.0, 1.5))
 
             mark_bce_status(bce_raw, "done")

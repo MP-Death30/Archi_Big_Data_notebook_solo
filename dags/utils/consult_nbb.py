@@ -2,7 +2,7 @@ import time
 import random
 import requests
 import logging
-from itertools import cycle
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.exceptions import RequestException
 
 from utils.db_utils import (
@@ -25,19 +25,17 @@ PROXIES = [
     {"http": "socks5h://tor5:9050", "https": "socks5h://tor5:9050"},
     {"http": "socks5h://tor6:9050", "https": "socks5h://tor6:9050"}
 ]
-proxy_pool = cycle(PROXIES)
 
 def get_new_session() -> requests.Session:
-    """Force la destruction du pool de connexions via une nouvelle instance."""
+    """Instanciation thread-safe avec assignation proxy aléatoire."""
     session = requests.Session()
     session.headers.update(HEADERS)
-    proxy = next(proxy_pool)
+    proxy = random.choice(PROXIES)
     session.proxies.update(proxy)
-    logging.info(f"[ROUTAGE] Bascule forcée sur le noeud : {proxy['http']}")
+    logging.debug(f"[ROUTAGE] Assignation nœud : {proxy['http']}")
     return session
 
 def fetch_with_retry(session: requests.Session, url: str, referer: str = None, retries: int = 5):
-    """Wrapper transactionnel : intercepte les blocages API (429) et les défaillances SOCKS."""
     if referer:
         session.headers.update({"Referer": referer})
         try:
@@ -56,61 +54,80 @@ def fetch_with_retry(session: requests.Session, url: str, referer: str = None, r
             r.raise_for_status()
             return r, session
         except RequestException as e:
-            logging.warning(f"Défaillance réseau/SOCKS (Essai {attempt+1}/{retries}) : {str(e)[:80]}. Bascule noeud.")
+            logging.warning(f"Défaillance SOCKS/Réseau (Essai {attempt+1}/{retries}) : {str(e)[:60]}. Bascule.")
             session = get_new_session()
-            time.sleep(random.uniform(1.0, 2.0))
+            time.sleep(random.uniform(2.0, 5.0))
             
     raise Exception(f"Echec critique d'accès après {retries} tentatives : {url}")
 
-
-def process_nbb_csv():
+def process_single_bce(bce_raw: str):
+    """Fonction atomique exécutée par chaque thread pour une entité."""
+    # Isolation des clients I/O
     hdfs = get_hdfs_client()
     session = get_new_session()
+    
+    bce_clean = str(bce_raw).replace(".", "")
+    api_url = f"{BASE}/rs-consult/published-deposits?page=0&size=50&enterpriseNumber={bce_clean}&sort=periodEndDate,desc"
+    referer_url = f"https://consult.cbso.nbb.be/consult-enterprise/{bce_clean}"
+    
+    try:
+        r, session = fetch_with_retry(session, api_url, referer=referer_url)
+        deposits = r.json().get("content", [])
+    except Exception as e:
+        logging.error(f"Abandon extraction entité {bce_clean}: {e}")
+        mark_bce_status(bce_raw, "pending")
+        return False
 
+    for dep in deposits:
+        deposit_id = dep["id"]
+        year = dep.get("periodEndDateYear")
+        
+        if not year or int(year) < 2021:
+            continue
+            
+        if dep.get("migration"):
+            continue
+
+        if is_downloaded(bce_clean, deposit_id, "COMPTE_ANNUEL"):
+            continue
+
+        hdfs_dir = f"/donnees_entreprises/{bce_clean}/Compte_annuel/{year}"
+        csv_url = f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}"
+        
+        try:
+            r_csv, session = fetch_with_retry(session, csv_url)
+            write_to_hdfs(hdfs, f"{hdfs_dir}/{bce_clean}_{year}_{deposit_id}.csv", r_csv.content)
+            mark_downloaded(bce_clean, deposit_id, "COMPTE_ANNUEL", year, hdfs_dir)
+            logging.info(f"I/O HDFS : {bce_clean} | {year}")
+        except Exception as e:
+            logging.error(f"Echec persistance I/O {deposit_id}: {e}")
+
+        time.sleep(random.uniform(2.0, 5.0))
+
+    mark_bce_status(bce_raw, "done")
+    return True
+
+def process_nbb_csv():
+    # Correspondance architecturale : 1 thread maximum par conteneur Tor disponible
+    MAX_WORKERS = 6 
+    
     while True:
         bce_list = get_pending_bce_numbers(limit=50)
         if not bce_list:
             logging.info("File d'attente d'orchestration épuisée.")
             break
 
-        for bce_raw in bce_list:
-            bce_clean = str(bce_raw).replace(".", "")
+        logging.info(f"Injection batch ({len(bce_list)} entités) dans pool d'exécution ({MAX_WORKERS} threads).")
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(process_single_bce, bce): bce for bce in bce_list}
             
-            api_url = f"{BASE}/rs-consult/published-deposits?page=0&size=50&enterpriseNumber={bce_clean}&sort=periodEndDate,desc"
-            referer_url = f"https://consult.cbso.nbb.be/consult-enterprise/{bce_clean}"
-            
-            try:
-                r, session = fetch_with_retry(session, api_url, referer=referer_url)
-                deposits = r.json().get("content", [])
-            except Exception as e:
-                logging.error(f"Abandon extraction entité {bce_clean}: {e}")
-                mark_bce_status(bce_raw, "pending")
-                continue
-
-            for dep in deposits:
-                deposit_id = dep["id"]
-                year = dep.get("periodEndDateYear")
-                
-                if not year or int(year) < 2021:
-                    continue
-                    
-                if dep.get("migration"):
-                    continue
-
-                if is_downloaded(bce_clean, deposit_id, "COMPTE_ANNUEL"):
-                    continue
-
-                hdfs_dir = f"/donnees_entreprises/{bce_clean}/Compte_annuel/{year}"
-                csv_url = f"{BASE}/external/broker/public/deposits/consult/csv/{deposit_id}"
-                
+            for future in as_completed(futures):
+                bce_raw = futures[future]
                 try:
-                    r_csv, session = fetch_with_retry(session, csv_url)
-                    write_to_hdfs(hdfs, f"{hdfs_dir}/{bce_clean}_{year}_{deposit_id}.csv", r_csv.content)
-                    mark_downloaded(bce_clean, deposit_id, "COMPTE_ANNUEL", year, hdfs_dir)
-                    logging.info(f"I/O HDFS : {bce_clean} | {year}")
+                    success = future.result()
+                    if not success:
+                        logging.warning(f"Exécution incomplète pour : {bce_raw}")
                 except Exception as e:
-                    logging.error(f"Echec persistance I/O {deposit_id}: {e}")
-
-                time.sleep(random.uniform(1.0, 1.5))
-
-            mark_bce_status(bce_raw, "done")
+                    logging.error(f"Crash d'exécution de thread sur {bce_raw} : {e}")
+                    mark_bce_status(bce_raw, "pending")
